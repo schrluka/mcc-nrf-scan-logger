@@ -58,6 +58,7 @@
 #include "nrf_ble_gatt.h"
 #include "nrf_pwr_mgmt.h"
 #include "nrf_ble_scan.h"
+#include "nrf_drv_rtc.h"
 
 #include "nrf_log.h"
 #include "nrf_log_ctrl.h"
@@ -72,7 +73,7 @@
 
 #define NUS_SERVICE_UUID_TYPE   BLE_UUID_TYPE_VENDOR_BEGIN              /**< UUID type for the Nordic UART Service (vendor specific). */
 
-#define ECHOBACK_BLE_UART_DATA  1                                       /**< Echo the UART data that is received over the Nordic UART Service (NUS) back to the sender. */
+#define ECHOBACK_BLE_UART_DATA  0                                       /**< Echo the UART data that is received over the Nordic UART Service (NUS) back to the sender. */
 
 #define BLE_UUID_MODEL_CAR_SERVICE      0xCAFE
 
@@ -80,6 +81,7 @@ BLE_NUS_C_DEF(m_ble_nus_c);                                             /**< BLE
 NRF_BLE_GATT_DEF(m_gatt);                                               /**< GATT module instance. */
 BLE_DB_DISCOVERY_DEF(m_db_disc);                                        /**< Database discovery module instance. */
 NRF_BLE_SCAN_DEF(m_scan);                                               /**< Scanning Module instance. */
+nrfx_rtc_t m_rtc = NRFX_RTC_INSTANCE(2);    // RTC used to timestamp received messages (RTC 0 is used by the soft device, 1 by the App timers)
 
 static uint16_t m_ble_nus_max_data_len = BLE_GATT_ATT_MTU_DEFAULT - OPCODE_LENGTH - HANDLE_LENGTH; /**< Maximum length of data (in bytes) that can be transmitted to the peer by the Nordic UART service module. */
 
@@ -492,8 +494,9 @@ void uart_send_str(const char * str)
 // report a scan response via uart
 static void send_log(ble_gap_evt_adv_report_t const * p_report)
 {
-    static char str[10];  // string buffer
+    static char str[24];  // string buffer
     
+    uint32_t rtc_ticks = nrfx_rtc_counter_get(&m_rtc);
 
     if (p_report == NULL)
     {
@@ -501,7 +504,7 @@ static void send_log(ble_gap_evt_adv_report_t const * p_report)
     }
 
     // lets see if we have a manufacturer specific data structure
-    uint16_t offset = 0;
+    uint16_t offset = 0;  // this is important
     uint16_t len    = ble_advdata_search(p_report->data.p_data, p_report->data.len, &offset, 
                                           BLE_GAP_AD_TYPE_MANUFACTURER_SPECIFIC_DATA);
 
@@ -521,6 +524,23 @@ static void send_log(ble_gap_evt_adv_report_t const * p_report)
     if (company_identifier != 0xFFFF)   // we use 'invalid company' as ID
     {
         return;
+    }
+
+    // send a timestamp (ms since start)
+    float ms_ticks = rtc_ticks * 0.9765625F;  // this is 1000/1024.0 
+    snprintf(str, sizeof(str), "%6ul ", (unsigned long)(ms_ticks));
+    uart_send_str(str);
+
+    // send the mac address
+    for (int i=BLE_GAP_ADDR_LEN-1; i>=0; i--) 
+    { 
+        char c = ':';
+        if (i == 0) 
+        {
+            c = ' ';
+        }
+        snprintf(str, sizeof(str)-1, "%02x%c", p_report->peer_addr.addr[i], c);
+        uart_send_str(str);
     }
 
     // assemble a string to be sent to the PC for logging etc
@@ -706,6 +726,24 @@ static void db_discovery_init(void)
 }
 
 
+static void rtc_handler(nrfx_rtc_int_type_t int_type)
+{
+    return;
+}
+
+static void rtc_init(void)
+{
+    nrfx_err_t err;
+    nrfx_rtc_config_t cfg = NRFX_RTC_DEFAULT_CONFIG;
+    cfg.prescaler = 32; // with a 32768Hz crystal a counter frequency of 1024Hz results
+     
+    err = nrfx_rtc_init(&m_rtc, &cfg, rtc_handler);
+    APP_ERROR_CHECK(err);
+                        
+    nrfx_rtc_enable(&m_rtc);
+}
+
+
 /**@brief Function for handling the idle state (main loop).
  *
  * @details Handles any pending log operations, then sleeps until the next event occurs.
@@ -732,6 +770,7 @@ int main(void)
     gatt_init();
     nus_c_init();
     scan_init();
+    rtc_init();
 
     // Start execution.
     //printf("BLE UART central example started.\r\n");
